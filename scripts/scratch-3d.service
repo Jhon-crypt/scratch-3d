@@ -1,0 +1,20 @@
+# systemd unit — start scratch-3d stack (including UI) on boot
+# Install: sudo cp /root/scratch-3d/scripts/scratch-3d.service /etc/systemd/system/
+#         sudo systemctl daemon-reload
+#         sudo systemctl enable scratch-3d
+#         sudo systemctl start scratch-3d
+[Unit]
+Description=Scratch 3D pipeline (orchestrator, UI, FLUX, reconstruction, Redis)
+After=docker.service network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/root/scratch-3d
+ExecStart=/usr/bin/docker-compose up -d
+ExecStop=/usr/bin/docker-compose down
+TimeoutStartSec=0
+
+[Install]
+WantedBy=multi-user.target

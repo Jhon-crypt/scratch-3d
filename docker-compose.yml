@@ -1,0 +1,125 @@
+# 3D Asset Pipeline — Production-grade infrastructure
+# Prompt/images → multi-view images → 3D mesh
+# Shared volumes: /models, /inputs, /outputs, /cache
+# GPU: FLUX on 0-3, 3D reconstruction on 4-7 (set CUDA_VISIBLE_DEVICES per service)
+
+services:
+  redis:
+    image: redis:7-alpine
+    # ports: "6379:6379"  # optional; omit if port already in use
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+
+  # Host nginx: /3d-test/ -> ui:38101, / -> orchestrator:38100
+  # See /etc/nginx/sites-available/elohim-bitch-gpu.insanelabs.org
+
+  ui:
+    build:
+      context: ./ui/test_3d
+      dockerfile: Dockerfile
+    ports:
+      - "38101:80"
+
+  orchestrator:
+    build:
+      context: .
+      dockerfile: orchestrator/Dockerfile
+    expose:
+      - "8000"
+    # Optional: direct port for local access (e.g. http://localhost:38100)
+    ports:
+      - "38100:8000"
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      IMAGE_SERVICE_URL: http://image-service:8000
+      RECONSTRUCT_SERVICE_URL: http://reconstruction-service:8000
+      POSTPROCESS_SERVICE_URL: http://postprocess-service:8000
+      OUTPUTS_DIR: /outputs
+      INPUTS_DIR: /inputs
+      ENABLE_POSTPROCESS: "true"
+    volumes:
+      - models_vol:/models
+      - ./outputs:/outputs    # 3D assets appear in scratch-3d/outputs/
+      - ./inputs:/inputs      # uploaded/generated images in scratch-3d/inputs/
+      - cache_vol:/cache
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  flux-service:
+    build:
+      context: .
+      dockerfile: flux-service/Dockerfile
+    runtime: nvidia
+    environment:
+      INPUTS_DIR: /inputs
+      FLUX_MODEL: "black-forest-labs/FLUX.1-schnell"
+      NVIDIA_VISIBLE_DEVICES: "0"
+      # HF token for gated FLUX model (set in .env, never commit .env)
+      HF_TOKEN: ${HF_TOKEN}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["0"]
+              capabilities: [gpu]
+    volumes:
+      - models_vol:/models
+      - ./inputs:/inputs
+    # Optional: expose for direct calls
+    # ports:
+    #   - "8001:8000"
+
+  image-service:
+    build:
+      context: .
+      dockerfile: image-service/Dockerfile
+    environment:
+      INPUTS_DIR: /inputs
+      # Use real FLUX when flux-service is running; set USE_IMAGE_STUB=true to skip FLUX (no GPU)
+      USE_IMAGE_STUB: "false"
+      FLUX_BACKEND_URL: "http://flux-service:8000"
+    volumes:
+      - models_vol:/models
+      - ./inputs:/inputs
+      - cache_vol:/cache
+    depends_on:
+      - flux-service
+
+  reconstruction-service:
+    build:
+      context: .
+      dockerfile: reconstruction-service/Dockerfile
+    runtime: nvidia
+    environment:
+      NVIDIA_VISIBLE_DEVICES: "4"
+      INPUTS_DIR: /inputs
+      OUTPUTS_DIR: /outputs
+      CACHE_DIR: /cache
+    volumes:
+      - models_vol:/models
+      - ./inputs:/inputs
+      - ./outputs:/outputs
+      - cache_vol:/cache
+
+  postprocess-service:
+    build:
+      context: .
+      dockerfile: postprocess-service/Dockerfile
+    environment:
+      OUTPUTS_DIR: /outputs
+      CACHE_DIR: /cache
+    volumes:
+      - ./outputs:/outputs
+      - cache_vol:/cache
+
+volumes:
+  redis_data:
+  models_vol:
+  cache_vol:
