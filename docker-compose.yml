@@ -37,6 +37,7 @@ services:
     environment:
       REDIS_URL: redis://redis:6379/0
       IMAGE_SERVICE_URL: http://image-service:8000
+      VIEW_SYNTHESIS_SERVICE_URL: http://view-synthesis-service:8000
       RECONSTRUCT_SERVICE_URL: http://reconstruction-service:8000
       POSTPROCESS_SERVICE_URL: http://postprocess-service:8000
       OUTPUTS_DIR: /outputs
@@ -91,6 +92,23 @@ services:
       - cache_vol:/cache
     depends_on:
       - flux-service
+
+  view-synthesis-service:
+    build:
+      context: .
+      dockerfile: view-synthesis-service/Dockerfile
+    runtime: nvidia
+    environment:
+      NVIDIA_VISIBLE_DEVICES: "1"
+      INPUTS_DIR: /inputs
+      OUTPUTS_DIR: /outputs
+    volumes:
+      - models_vol:/models
+      - ./inputs:/inputs
+      - ./outputs:/outputs
+      - cache_vol:/cache
+    depends_on:
+      - image-service
 
   reconstruction-service:
     build:

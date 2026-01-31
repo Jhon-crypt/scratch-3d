@@ -23,10 +23,14 @@ except ImportError:
 # Config from env
 REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
 IMAGE_SERVICE_URL = os.getenv("IMAGE_SERVICE_URL", "http://image-service:8000")
+VIEW_SYNTHESIS_SERVICE_URL = os.getenv("VIEW_SYNTHESIS_SERVICE_URL", "http://view-synthesis-service:8000")
 RECONSTRUCT_SERVICE_URL = os.getenv("RECONSTRUCT_SERVICE_URL", "http://reconstruction-service:8000")
 POSTPROCESS_SERVICE_URL = os.getenv("POSTPROCESS_SERVICE_URL", "http://postprocess-service:8000")
 OUTPUTS_DIR = os.getenv("OUTPUTS_DIR", "/outputs")
 INPUTS_DIR = os.getenv("INPUTS_DIR", "/inputs")
+
+# Minimum view count for reconstruction (spec: never reconstruct with fewer)
+MIN_VIEWS_FOR_RECONSTRUCTION = 6
 
 redis_client: Optional[Redis] = None
 JOB_PREFIX = "job:"
@@ -84,27 +88,59 @@ def _build_view_prompts(prompt: str, view_names: List[str]) -> List[dict]:
 
 
 async def run_job(job_id: str, payload: dict):
-    """Execute pipeline: images -> reconstruct -> optional postprocess -> save."""
+    """
+    Correct pipeline (mandatory):
+    Prompt -> Canonical Image -> View-Consistent Synthesis -> Masking -> 3D Reconstruction -> Post-Process.
+    Never direct prompt -> random multi-view -> 3D.
+    """
     r = get_redis()
     try:
-        # 1. Images: either generate or use provided
-        r.hset(f"{JOB_PREFIX}{job_id}", mapping={"state": JobState.GENERATING_IMAGES.value})
-        image_paths = []
-
         if "prompt" in payload and payload["prompt"]:
-            view_names = _views_for_tier(QualityTier(payload.get("quality_tier", "standard")))
-            prompts = _build_view_prompts(payload["prompt"], view_names)
+            # --- Stage 1: Canonical image (single object, 3/4 view, neutral gray bg) ---
+            r.hset(f"{JOB_PREFIX}{job_id}", mapping={"state": JobState.GENERATING_CANONICAL.value})
             async with httpx.AsyncClient(timeout=300.0) as client:
                 resp = await client.post(
-                    f"{IMAGE_SERVICE_URL}/imagine/generate",
-                    json={"prompts": [p["prompt"] for p in prompts], "quality_tier": payload.get("quality_tier", "standard")},
+                    f"{IMAGE_SERVICE_URL}/imagine/canonical",
+                    json={
+                        "prompt": payload["prompt"],
+                        "quality_tier": payload.get("quality_tier", "standard"),
+                    },
                 )
             if resp.status_code != 200:
-                raise RuntimeError(f"Image service error: {resp.text}")
+                raise RuntimeError(f"Canonical image error: {resp.text}")
             data = resp.json()
-            image_paths = data.get("image_paths", [])
+            canonical_path = data.get("canonical_path") or data.get("image_path")
+            if not canonical_path or not os.path.isfile(canonical_path):
+                raise RuntimeError("Canonical image not produced or path invalid")
+
+            # --- Stage 2: View-consistent synthesis (Zero123++) from canonical ---
+            r.hset(f"{JOB_PREFIX}{job_id}", mapping={"state": JobState.SYNTHESIZING_VIEWS.value})
+            async with httpx.AsyncClient(timeout=600.0) as client:
+                syn_resp = await client.post(
+                    f"{VIEW_SYNTHESIS_SERVICE_URL}/synthesize/views",
+                    json={
+                        "image_path": canonical_path,
+                        "mask_views": True,
+                        "num_inference_steps": 75,
+                    },
+                )
+            if syn_resp.status_code != 200:
+                raise RuntimeError(f"View synthesis error: {syn_resp.text}")
+            syn_data = syn_resp.json()
+            view_paths = syn_data.get("view_paths", [])
+
+            # --- Failure condition: fewer than 6 valid views ---
+            if len(view_paths) < MIN_VIEWS_FOR_RECONSTRUCTION:
+                raise RuntimeError(
+                    f"Views insufficient for reconstruction: got {len(view_paths)}, "
+                    f"need at least {MIN_VIEWS_FOR_RECONSTRUCTION}. Abort."
+                )
+
+            # Stage 3 (masking) done inside view-synthesis when mask_views=True
+            r.hset(f"{JOB_PREFIX}{job_id}", mapping={"state": JobState.RECONSTRUCTING_3D.value})
+
         else:
-            # from-image: use provided paths (under /inputs)
+            # from-image: use provided images; skip canonical + view-synthesis
             paths = payload.get("image_paths") or []
             urls = payload.get("image_urls") or []
             if urls:
@@ -115,19 +151,19 @@ async def run_job(job_id: str, payload: dict):
                     )
                 if resp.status_code != 200:
                     raise RuntimeError(f"Image service from-urls error: {resp.text}")
-                image_paths = resp.json().get("image_paths", [])
+                view_paths = resp.json().get("image_paths", [])
             else:
-                image_paths = [p if p.startswith("/") else f"{INPUTS_DIR}/{p}" for p in paths]
+                view_paths = [p if p.startswith("/") else f"{INPUTS_DIR}/{p}" for p in paths]
 
-        if not image_paths:
-            raise RuntimeError("No images available for reconstruction")
+            if not view_paths:
+                raise RuntimeError("No images available for reconstruction")
+            r.hset(f"{JOB_PREFIX}{job_id}", mapping={"state": JobState.RECONSTRUCTING_3D.value})
 
-        # 2. 3D Reconstruction
-        r.hset(f"{JOB_PREFIX}{job_id}", mapping={"state": JobState.RECONSTRUCTING_3D.value})
+        # --- Stage 4: 3D Reconstruction (masked, view-consistent images) ---
         async with httpx.AsyncClient(timeout=600.0) as client:
             recon_resp = await client.post(
                 f"{RECONSTRUCT_SERVICE_URL}/reconstruct/mesh",
-                json={"image_paths": image_paths, "output_format": payload.get("output_format", "glb")},
+                json={"image_paths": view_paths, "output_format": payload.get("output_format", "glb")},
             )
         if recon_resp.status_code != 200:
             raise RuntimeError(f"Reconstruction error: {recon_resp.text}")
@@ -136,7 +172,7 @@ async def run_job(job_id: str, payload: dict):
         if not mesh_path:
             raise RuntimeError("Reconstruction did not return mesh_path")
 
-        # 3. Optional post-processing
+        # --- Stage 5: Post-processing (mandatory for quality) ---
         if os.getenv("ENABLE_POSTPROCESS", "true").lower() == "true":
             r.hset(f"{JOB_PREFIX}{job_id}", mapping={"state": JobState.POST_PROCESSING.value})
             async with httpx.AsyncClient(timeout=300.0) as client:
@@ -148,7 +184,7 @@ async def run_job(job_id: str, payload: dict):
                 pp_data = pp_resp.json()
                 mesh_path = pp_data.get("output_path", mesh_path)
 
-        # 4. Copy/finalize to job output path
+        # --- Finalize ---
         import shutil
         ext = payload.get("output_format", "glb")
         final_path = os.path.join(OUTPUTS_DIR, f"{job_id}.{ext}")
@@ -272,6 +308,56 @@ async def list_jobs():
                 "asset_path": data.get("asset_path"),
             })
     return {"jobs": out}
+
+
+def _list_dirs(parent: str) -> list:
+    """Return list of { name, path, mtime } for subdirectories."""
+    out = []
+    if not parent or not os.path.isdir(parent):
+        return out
+    for name in os.listdir(parent):
+        path = os.path.join(parent, name)
+        if os.path.isdir(path):
+            try:
+                mtime = int(os.path.getmtime(path))
+            except OSError:
+                mtime = 0
+            out.append({"name": name, "path": path, "mtime": mtime})
+    out.sort(key=lambda x: -x["mtime"])
+    return out
+
+
+@app.get("/3d/folders")
+async def list_folders():
+    """List generated input and view folders (for display and delete in UI)."""
+    input_folders = _list_dirs(INPUTS_DIR)
+    views_dir = os.path.join(OUTPUTS_DIR, "views")
+    view_folders = _list_dirs(views_dir)
+    return {
+        "input_folders": input_folders,
+        "view_folders": view_folders,
+    }
+
+
+@app.delete("/3d/folder/{folder_type}/{name}")
+async def delete_folder(folder_type: str, name: str):
+    """Delete a generated folder by type (input or view) and name. Name must be a single path segment."""
+    if folder_type not in ("input", "view"):
+        raise HTTPException(400, "folder_type must be 'input' or 'view'")
+    if ".." in name or "/" in name or "\\" in name:
+        raise HTTPException(400, "Invalid folder name")
+    if folder_type == "input":
+        path = os.path.join(INPUTS_DIR, name)
+    else:
+        path = os.path.join(OUTPUTS_DIR, "views", name)
+    if not os.path.isdir(path):
+        raise HTTPException(404, "Folder not found")
+    import shutil
+    try:
+        shutil.rmtree(path)
+    except OSError as e:
+        raise HTTPException(500, str(e))
+    return {"ok": True}
 
 
 @app.delete("/3d/job/{job_id}")

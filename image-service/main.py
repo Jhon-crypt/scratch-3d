@@ -26,6 +26,12 @@ class GenerateRequest(BaseModel):
     quality_tier: str = "standard"  # standard -> 512, high -> 768 or 1024
 
 
+class CanonicalRequest(BaseModel):
+    """Stage 1: Generate exactly ONE canonical reference image (object identity)."""
+    prompt: str = Field(..., min_length=1)
+    quality_tier: str = "standard"
+
+
 class FromUrlsRequest(BaseModel):
     urls: List[str] = Field(..., min_length=1)
 
@@ -90,6 +96,27 @@ async def _generate_with_flux(prompts: List[str], quality_tier: str) -> List[str
                 paths.append(str(path))
 
     return paths
+
+
+def _canonical_prompt(user_prompt: str) -> str:
+    """Single object, centered, 3/4 view, neutral gray background."""
+    return (
+        f"studio photograph of {user_prompt}, 3/4 front view, neutral gray background, "
+        "soft lighting, highly detailed, single object centered, no clutter"
+    )
+
+
+@app.post("/imagine/canonical")
+async def generate_canonical(req: CanonicalRequest):
+    """Stage 1: Generate exactly ONE canonical reference image. Defines object identity."""
+    try:
+        canonical_prompt = _canonical_prompt(req.prompt)
+        paths = await _generate_with_flux([canonical_prompt], req.quality_tier)
+        if not paths:
+            raise RuntimeError("No image generated")
+        return {"image_path": paths[0], "canonical_path": paths[0]}
+    except Exception as e:
+        raise HTTPException(500, str(e))
 
 
 @app.post("/imagine/generate")

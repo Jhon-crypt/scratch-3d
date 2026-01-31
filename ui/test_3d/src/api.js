@@ -39,3 +39,17 @@ export async function deleteJob(jobId) {
   if (!r.ok) throw new Error(r.statusText)
   return r.json()
 }
+
+export async function listFolders() {
+  const r = await fetch(`${API_BASE}/3d/folders`)
+  if (!r.ok) throw new Error(r.statusText)
+  return r.json()
+}
+
+export async function deleteFolder(folderType, name) {
+  const r = await fetch(`${API_BASE}/3d/folder/${folderType}/${encodeURIComponent(name)}`, {
+    method: 'DELETE',
+  })
+  if (!r.ok) throw new Error(r.statusText)
+  return r.json()
+}

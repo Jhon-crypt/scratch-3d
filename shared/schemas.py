@@ -7,11 +7,20 @@ from typing import Optional
 # Job states for Redis
 class JobState(str, Enum):
     QUEUED = "queued"
-    GENERATING_IMAGES = "generating_images"
-    RECONSTRUCTING_3D = "reconstructing_3d"
-    POST_PROCESSING = "post_processing"
+    GENERATING_CANONICAL = "generating_canonical"   # Stage 1: one reference image
+    SYNTHESIZING_VIEWS = "synthesizing_views"      # Stage 2: view-consistent synthesis
+    MASKING = "masking"                             # Stage 3: remove background
+    RECONSTRUCTING_3D = "reconstructing_3d"         # Stage 4: mesh from views
+    POST_PROCESSING = "post_processing"            # Stage 5: cleanup
     COMPLETED = "completed"
     FAILED = "failed"
+
+
+# Stage 1: canonical image prompt template (single object, centered, neutral bg)
+CANONICAL_PROMPT_TEMPLATE = (
+    "studio photograph of {prompt}, 3/4 front view, neutral gray background, "
+    "soft lighting, highly detailed, single object centered, no clutter"
+)
 
 
 class OutputFormat(str, Enum):
