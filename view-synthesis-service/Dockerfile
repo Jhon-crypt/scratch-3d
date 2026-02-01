@@ -12,7 +12,9 @@ RUN git clone --depth 1 https://github.com/SUDO-AI-3D/zero123plus.git /app/zero1
 
 WORKDIR /app
 COPY view-synthesis-service /app/view-synthesis-service
-RUN pip install --no-cache-dir -r view-synthesis-service/requirements.txt
+# Force numpy<2 so transformers 4.29 does not report "Numpy is not available" (NumPy 2.x incompatibility)
+RUN pip install --no-cache-dir "numpy>=1.24,<2" && \
+    pip install --no-cache-dir -r view-synthesis-service/requirements.txt
 
 ENV ZERO123_CUSTOM_PIPELINE=/app/zero123plus/diffusers-support
 

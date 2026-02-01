@@ -13,14 +13,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN git clone --depth 1 https://github.com/VAST-AI-Research/TripoSR.git /app/triposr
 
 WORKDIR /app/triposr
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt && \
+    pip install --no-cache-dir onnxruntime
 
 WORKDIR /app
 COPY reconstruction-service /app/reconstruction-service
 ENV PYTHONPATH=/app/triposr
 WORKDIR /app/reconstruction-service
 
-RUN pip install --no-cache-dir fastapi "uvicorn[standard]" pydantic python-multipart
+RUN pip install --no-cache-dir -r requirements.txt
 
 EXPOSE 8000
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Ensure PYTHONPATH is set so tsr (TripoSR) is importable
+CMD ["sh", "-c", "export PYTHONPATH=/app/triposr && exec uvicorn main:app --host 0.0.0.0 --port 8000"]

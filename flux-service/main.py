@@ -30,13 +30,11 @@ def get_pipe():
     from diffusers import FluxPipeline
 
     dtype = torch.bfloat16
-    pipe = FluxPipeline.from_pretrained(FLUX_MODEL, torch_dtype=dtype)
-    # Lower VRAM: CPU offload; enable VAE slicing/tiling for large images
+    token = os.getenv("HF_TOKEN") or None  # required for gated FLUX.1-schnell
+    pipe = FluxPipeline.from_pretrained(FLUX_MODEL, torch_dtype=dtype, token=token)
     pipe.enable_model_cpu_offload()
     pipe.vae.enable_slicing()
     pipe.vae.enable_tiling()
-    # Optional: sequential CPU offload for very low VRAM (slower)
-    # pipe.enable_sequential_cpu_offload()
     return pipe
 
 
@@ -49,61 +47,56 @@ class GenerateRequest(BaseModel):
     seed: Optional[int] = None
 
 
-@app.on_event("startup")
-def startup():
-    """Load model once at startup (stays hot)."""
-    get_pipe()
-
-
 @app.post("/generate")
 def generate(req: GenerateRequest):
     """Generate one image from prompt. Returns image_path and image_b64."""
     import torch
 
-    steps = req.num_inference_steps
-    guidance = req.guidance_scale
-    if USE_SCHNELL:
-        steps = steps or 4
-        guidance = guidance if guidance is not None else 0.0
-        if guidance != 0.0:
-            guidance = 0.0
-    else:
-        steps = steps or 28
-        guidance = guidance if guidance is not None else 3.5
+    try:
+        steps = req.num_inference_steps
+        guidance = req.guidance_scale
+        if USE_SCHNELL:
+            steps = steps or 4
+            guidance = guidance if guidance is not None else 0.0
+            if guidance != 0.0:
+                guidance = 0.0
+        else:
+            steps = steps or 28
+            guidance = guidance if guidance is not None else 3.5
 
-    generator = None
-    if req.seed is not None:
-        generator = torch.Generator(device="cpu").manual_seed(req.seed)
+        generator = None
+        if req.seed is not None:
+            generator = torch.Generator(device="cpu").manual_seed(req.seed)
 
-    pipe = get_pipe()
-    kwargs = {
-        "prompt": req.prompt,
-        "height": req.height,
-        "width": req.width,
-        "num_inference_steps": steps,
-        "guidance_scale": guidance,
-        "generator": generator,
-    }
-    if USE_SCHNELL:
-        kwargs["max_sequence_length"] = 256
+        pipe = get_pipe()
+        kwargs = {
+            "prompt": req.prompt,
+            "height": req.height,
+            "width": req.width,
+            "num_inference_steps": steps,
+            "guidance_scale": guidance,
+            "generator": generator,
+        }
+        if USE_SCHNELL:
+            kwargs["max_sequence_length"] = 256
 
-    out = pipe(**kwargs)
-    image = out.images[0]
+        out = pipe(**kwargs)
+        image = out.images[0]
 
-    # Save to INPUTS_DIR for pipeline use
-    Path(INPUTS_DIR).mkdir(parents=True, exist_ok=True)
-    job_id = str(uuid.uuid4())
-    out_dir = Path(INPUTS_DIR) / f"flux_{job_id}"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    path = out_dir / "image.png"
-    image.save(str(path))
+        Path(INPUTS_DIR).mkdir(parents=True, exist_ok=True)
+        job_id = str(uuid.uuid4())
+        out_dir = Path(INPUTS_DIR) / f"flux_{job_id}"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        path = out_dir / "image.png"
+        image.save(str(path))
 
-    # Also return base64 for HTTP clients that prefer it
-    buf = io.BytesIO()
-    image.save(buf, format="PNG")
-    image_b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
+        buf = io.BytesIO()
+        image.save(buf, format="PNG")
+        image_b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
 
-    return {"image_path": str(path), "image_b64": image_b64}
+        return {"image_path": str(path), "image_b64": image_b64}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/health")

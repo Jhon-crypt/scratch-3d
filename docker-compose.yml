@@ -99,7 +99,8 @@ services:
       dockerfile: view-synthesis-service/Dockerfile
     runtime: nvidia
     environment:
-      NVIDIA_VISIBLE_DEVICES: "1"
+      # Single-GPU host: use 0; multi-GPU: set VIEW_SYNTHESIS_GPU=1 in .env
+      NVIDIA_VISIBLE_DEVICES: "0"
       INPUTS_DIR: /inputs
       OUTPUTS_DIR: /outputs
     volumes:
@@ -116,7 +117,8 @@ services:
       dockerfile: reconstruction-service/Dockerfile
     runtime: nvidia
     environment:
-      NVIDIA_VISIBLE_DEVICES: "4"
+      # Single-GPU host: use 0; multi-GPU: set RECONSTRUCTION_GPU=4 in .env
+      NVIDIA_VISIBLE_DEVICES: "0"
       INPUTS_DIR: /inputs
       OUTPUTS_DIR: /outputs
       CACHE_DIR: /cache

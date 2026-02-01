@@ -40,8 +40,13 @@ def _get_model():
         return _triposr_model
     try:
         from tsr.system import TSR
-        device = _device()
-        logger.info("Loading TripoSR model on %s ...", device)
+    except Exception as e:
+        raise RuntimeError(
+            f"TripoSR import failed (check PYTHONPATH=/app/triposr and rebuild): {e}"
+        ) from e
+    device = _device()
+    logger.info("Loading TripoSR model on %s ...", device)
+    try:
         _triposr_model = TSR.from_pretrained(
             "stabilityai/TripoSR",
             config_name="config.yaml",
@@ -52,8 +57,7 @@ def _get_model():
         logger.info("TripoSR model loaded.")
         return _triposr_model
     except Exception as e:
-        logger.warning("TripoSR load failed: %s — will use fallback cube", e)
-        return None
+        raise RuntimeError(f"TripoSR model load failed: {e}") from e
 
 
 def _get_rembg_session():
@@ -90,19 +94,17 @@ def _preprocess_image(image_path: str, foreground_ratio: float = 0.85):
 def _run_triposr(image_paths: List[str], output_path: str, fmt: str) -> str:
     """
     Run TripoSR on the first image. Write mesh to output_path.
-    Falls back to a simple cube if TripoSR is unavailable.
+    Requires TripoSR to be loaded; no silent cube fallback.
     """
-    import trimesh
-
     out_path = Path(output_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     model = _get_model()
     if model is None:
-        # Fallback: cube so pipeline still completes
-        box = trimesh.creation.box(extents=[1, 1, 1])
-        box.export(str(out_path), file_type=fmt)
-        return str(out_path)
+        raise RuntimeError(
+            "TripoSR failed to load. Rebuild reconstruction-service with TripoSR (see Dockerfile) "
+            "and ensure the container has GPU (NVIDIA_VISIBLE_DEVICES)."
+        )
 
     import torch
     device = _device()
@@ -112,7 +114,7 @@ def _run_triposr(image_paths: List[str], output_path: str, fmt: str) -> str:
 
     with torch.no_grad():
         scene_codes = model([image], device=device)
-    meshes = model.extract_mesh(scene_codes, use_vertex_color=True, resolution=256)
+    meshes = model.extract_mesh(scene_codes, True, resolution=256)
     mesh = meshes[0]
 
     # Export: TripoSR mesh has .export(path)

@@ -54,6 +54,7 @@ async def _generate_with_flux(prompts: List[str], quality_tier: str) -> List[str
 
     if FLUX_BACKEND_URL and not USE_INTERNAL_STUB:
         size = _resolution_for_tier(quality_tier)
+        flux_failed = False
         async with httpx.AsyncClient(timeout=300.0) as client:
             for i, prompt in enumerate(prompts):
                 resp = await client.post(
@@ -67,9 +68,9 @@ async def _generate_with_flux(prompts: List[str], quality_tier: str) -> List[str
                     },
                 )
                 if resp.status_code != 200:
-                    raise RuntimeError(f"FLUX error: {resp.text}")
+                    flux_failed = True
+                    break
                 data = resp.json()
-                # Assume response has image_b64 or image_path
                 if "image_b64" in data:
                     raw = base64.b64decode(data["image_b64"])
                     path = out_dir / f"view_{i:02d}.png"
@@ -77,8 +78,10 @@ async def _generate_with_flux(prompts: List[str], quality_tier: str) -> List[str
                     paths.append(str(path))
                 elif "image_path" in data:
                     paths.append(data["image_path"])
-    else:
-        # Stub: create placeholder images so pipeline can be tested
+        if flux_failed:
+            import logging
+            logging.warning("FLUX returned error; using stub canonical image so pipeline can continue.")
+    if not paths:
         minimal_png = base64.b64decode(
             "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
         )

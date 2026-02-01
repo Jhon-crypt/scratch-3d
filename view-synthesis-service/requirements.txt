@@ -2,7 +2,12 @@ fastapi>=0.109.0
 uvicorn[standard]>=0.27.0
 pydantic>=2.0.0
 torch>=2.0.0
-diffusers>=0.20.0
-transformers>=4.35.0
+# Pin numpy<2; transformers 4.29 reports "Numpy is not available" with NumPy 2.x
+numpy>=1.24.0,<2.0.0
+# Pin to Zero123++ compatible versions; newer transformers uses lazy CLIP (Placeholder) which breaks pipeline loading
+diffusers==0.20.2
+transformers==4.29.2
+# Older diffusers/transformers use cached_download; removed in huggingface_hub 0.20+
+huggingface_hub==0.17.3
 Pillow>=10.0.0
 rembg>=2.0.0

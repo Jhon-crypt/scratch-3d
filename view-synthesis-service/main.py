@@ -43,6 +43,7 @@ if hasattr(_torch_module, "distributed") and not hasattr(_torch_module.distribut
             def _noop(*a, **k):
                 return None
             return _noop
+    _FakeDeviceMesh.DeviceMesh = _FakeDeviceMesh  # diffusers may access device_mesh.DeviceMesh
     _torch_module.distributed.device_mesh = _FakeDeviceMesh
 
 import os
