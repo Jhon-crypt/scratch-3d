@@ -8,6 +8,12 @@ export async function health() {
   return r.json()
 }
 
+export async function checkAccess() {
+  const r = await fetch(`${API_BASE}/3d/access-check`)
+  if (!r.ok) return { allowed: false, client_ip: 'unknown', owner_ip: '' }
+  return r.json()
+}
+
 export async function generate3d({ prompt, output_format = 'glb', quality_tier = 'standard' }) {
   const r = await fetch(`${API_BASE}/3d/generate`, {
     method: 'POST',
@@ -26,6 +32,10 @@ export async function status(jobId) {
 
 export function downloadUrl(jobId) {
   return `${API_BASE}/3d/download/${jobId}`
+}
+
+export function downloadBundleUrl(jobId) {
+  return `${API_BASE}/3d/download-bundle/${jobId}`
 }
 
 export async function listJobs() {

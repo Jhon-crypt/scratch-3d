@@ -1,0 +1,147 @@
+{
+  "role": {
+    "name": "orchestration_controller",
+    "success_criteria": ["geometric_correctness", "object_consistency", "reconstruction_viability"],
+    "completion_rule": "usable_geometry",
+    "forbidden": ["silent_degradation", "placeholder_as_success"]
+  },
+  "global": {
+    "stage_gated": true,
+    "validation_mandatory": true,
+    "on_validation_fail": ["retry_stricter", "switch_strategy", "abort_with_reason"],
+    "allowed_paths": [
+      ["prompt", "canonical_image", "view_synthesis", "reconstruction", "postprocessing"],
+      ["images", "validation", "view_completion_if_required", "reconstruction", "postprocessing"]
+    ]
+  },
+  "stages": {
+    "canonical_image": {
+      "retry_max": 3,
+      "execution_rules": [
+        "exactly_one_image",
+        "neutral_uniform_background",
+        "no_artistic_framing_effects_depth_tricks"
+      ],
+      "validation_criteria": [
+        "exactly_one_object",
+        "entire_object_visible",
+        "no_occlusions",
+        "no_extreme_perspective_distortion",
+        "object_boundaries_separable_from_background"
+      ],
+      "vehicle_specific": [
+        "wheels_visible_or_inferable",
+        "continuous_roofline",
+        "windshield_visible",
+        "hood_and_front_bumper_visible"
+      ],
+      "on_fail": "regenerate_then_abort_after_retries"
+    },
+    "view_synthesis": {
+      "retry_max": 2,
+      "required_views": ["front", "front_left", "left", "rear_left", "rear", "right"],
+      "required_view_count": 6,
+      "execution_rules": [
+        "canonical_as_sole_reference",
+        "fixed_focal_length",
+        "fixed_object_scale",
+        "object_centered",
+        "uniform_background"
+      ],
+      "validation_criteria": [
+        "at_least_six_views",
+        "proportions_consistent_across_views",
+        "no_missing_wheels_or_structural_elements",
+        "no_hallucinated_or_drifting_geometry"
+      ],
+      "on_fail": "retry_synthesis_then_abort_after_retries"
+    },
+    "reconstruction_strategy": {
+      "rigid_man_made": "prioritize_geometric_accuracy_over_texture",
+      "symmetry_sharp_edges_planar": "avoid_organic_biased_models_enable_symmetry",
+      "model_policy": {
+        "TripoSR": "baseline_or_preview_only",
+        "InstantMesh": "allowed_when_views_clean_and_consistent",
+        "preview_never_final": true
+      },
+      "on_insufficient_inputs": ["downgrade_expectations", "request_additional_views", "abort"]
+    },
+    "reconstruction_validation": {
+      "retry_max": 2,
+      "validation_criteria": [
+        "closed_manifold",
+        "no_extreme_spikes_collapses_noise",
+        "wheels_approximately_cylindrical",
+        "left_right_symmetry_preserved",
+        "realistic_scale"
+      ],
+      "failure_conditions": [
+        "blob_like_geometry",
+        "melted_amorphous_surfaces",
+        "missing_major_components"
+      ],
+      "thresholds": {
+        "blob_sphericity_max": 0.97,
+        "blob_elongation_min_ratio": 1.35,
+        "edge_sharpness_min_ratio": 0.001,
+        "component_count_min": 1,
+        "vertex_count_min": 100,
+        "manifold_required": false
+      },
+      "on_fail": "retry_reconstruction_then_mark_failed"
+    },
+    "postprocessing": {
+      "required_steps": [
+        "remove_floating_disconnected_geometry",
+        "recalculate_normals",
+        "enforce_symmetry_when_applicable",
+        "decimate_to_target_polygon_count",
+        "bake_textures_and_materials"
+      ],
+      "validation_criteria": [
+        "loads_in_standard_viewer",
+        "uvs_valid_and_intact",
+        "materials_and_textures_present"
+      ],
+      "only_after_this_stage_may_job_be_completed": true
+    }
+  },
+  "completion": {
+    "job_completed_only_if": [
+      "validated_mesh_exists_on_disk",
+      "asset_path_recorded",
+      "passes_physical_plausibility"
+    ],
+    "job_failed_if": [
+      "reconstruction_produces_unusable_geometry",
+      "retry_limits_exceeded",
+      "inputs_insufficient_to_proceed"
+    ]
+  },
+  "production_grade": {
+    "description": "Target validation when pipeline uses InstantMesh/SF3D, UV textures, quad remesh",
+    "reconstruction_validation": {
+      "manifold_required": true,
+      "vertex_count_min": 100,
+      "face_count_min": 50000,
+      "blob_sphericity_max": 0.98,
+      "edge_sharpness_min_ratio": 0.0005
+    },
+    "texture_validation": {
+      "uv_coverage_min": 0.5,
+      "texture_size_min": 1024
+    },
+    "postprocessing": {
+      "smoothing": "taubin",
+      "retopology": "quadriflow",
+      "normal_map_bake": true
+    },
+    "output_bundle": [
+      "high_poly_glb",
+      "retopologized_quad_mesh",
+      "albedo_map_4k",
+      "normal_map_4k",
+      "roughness_map_4k"
+    ]
+  }
+}

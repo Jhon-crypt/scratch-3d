@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { generate3d, status, downloadUrl, listJobs, deleteJob, listFolders, deleteFolder } from './api'
+import { checkAccess, generate3d, status, downloadUrl, downloadBundleUrl, listJobs, deleteJob, listFolders, deleteFolder } from './api'
 import { ModelViewer } from './ModelViewer'
 
 const STATE_LABELS = {
@@ -19,6 +19,9 @@ function formatState(state) {
 const LOADING_STATES = ['queued', 'generating_canonical', 'synthesizing_views', 'masking', 'reconstructing_3d', 'post_processing']
 
 export default function App() {
+  const [accessChecked, setAccessChecked] = useState(false)
+  const [accessAllowed, setAccessAllowed] = useState(false)
+  const [blockedInfo, setBlockedInfo] = useState({ client_ip: '', owner_ip: '' })
   const [prompt, setPrompt] = useState('')
   const [quality, setQuality] = useState('fast')
   const [jobId, setJobId] = useState(null)
@@ -33,6 +36,18 @@ export default function App() {
   const [loadingFolders, setLoadingFolders] = useState(true)
   const [deletingJobId, setDeletingJobId] = useState(null)
   const [deletingFolder, setDeletingFolder] = useState(null)
+
+  useEffect(() => {
+    checkAccess().then((data) => {
+      setAccessAllowed(!!data.allowed)
+      setBlockedInfo({ client_ip: data.client_ip || '', owner_ip: data.owner_ip || '' })
+      setAccessChecked(true)
+    }).catch(() => {
+      setAccessAllowed(false)
+      setBlockedInfo({ client_ip: 'unknown', owner_ip: '' })
+      setAccessChecked(true)
+    })
+  }, [])
 
   const loadHistory = async () => {
     setLoadingHistory(true)
@@ -163,6 +178,32 @@ export default function App() {
     return d.toLocaleString()
   }
 
+  if (!accessChecked) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-indigo-950 flex items-center justify-center text-slate-400">
+        Checking access…
+      </div>
+    )
+  }
+
+  if (!accessAllowed) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-indigo-950 text-slate-100 font-sans flex items-center justify-center p-8">
+        <div className="max-w-lg text-center space-y-6">
+          <h1 className="text-2xl md:text-3xl font-bold text-red-300">
+            Fuck you for trying to access this.
+          </h1>
+          <p className="text-slate-300 text-lg">
+            You&apos;ll need to be sacrificed in the devil&apos;s blood to access this. Your IP address seems too holy.
+          </p>
+          <p className="text-slate-500 text-sm">
+            Your IP: <span className="font-mono text-slate-400">{blockedInfo.client_ip}</span>
+          </p>
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-indigo-950 text-slate-100 font-sans">
       <div className="max-w-4xl mx-auto px-6 py-12">
@@ -264,6 +305,13 @@ export default function App() {
                 </a>
               )}
             </div>
+            {viewingId && history.find((j) => j.job_id === viewingId)?.bundle_path ? (
+              <div className="px-6 py-2 border-b border-slate-700/60">
+                <a href={downloadBundleUrl(viewingId)} download className="text-sm text-violet-400 hover:underline">
+                  Download bundle
+                </a>
+              </div>
+            ) : null}
             <div className="aspect-square min-h-[320px] bg-slate-900/80">
               {glbUrl ? (
                 <ModelViewer src={glbUrl} />
@@ -308,13 +356,24 @@ export default function App() {
                 </button>
                 <div className="flex items-center gap-2 shrink-0">
                   {job.state === 'completed' && (
-                    <a
-                      href={downloadUrl(job.job_id)}
-                      download
-                      className="text-sm text-cyan-400 hover:underline"
-                    >
-                      Download
-                    </a>
+                    <>
+                      <a
+                        href={downloadUrl(job.job_id)}
+                        download
+                        className="text-sm text-cyan-400 hover:underline"
+                      >
+                        GLB
+                      </a>
+                      {job.bundle_path && (
+                        <a
+                          href={downloadBundleUrl(job.job_id)}
+                          download
+                          className="text-sm text-violet-400 hover:underline"
+                        >
+                          Bundle
+                        </a>
+                      )}
+                    </>
                   )}
                   <button
                     type="button"

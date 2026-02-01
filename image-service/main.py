@@ -102,11 +102,17 @@ async def _generate_with_flux(prompts: List[str], quality_tier: str) -> List[str
 
 
 def _canonical_prompt(user_prompt: str) -> str:
-    """Single object, centered, 3/4 view, neutral gray background."""
-    return (
-        f"studio photograph of {user_prompt}, 3/4 front view, neutral gray background, "
-        "soft lighting, highly detailed, single object centered, no clutter"
+    """Single object, centered, 3/4 view, full body visible, neutral gray background."""
+    prompt_lower = user_prompt.lower()
+    base = (
+        f"studio photograph of {user_prompt}, 3/4 front view, full body visible, "
+        "neutral gray background, soft lighting, highly detailed, single object centered, "
+        "no clutter, no cropping, sharp focus"
     )
+    # Vehicle-specific: wheels and key features visible for better reconstruction
+    if any(w in prompt_lower for w in ("car", "vehicle", "truck", "bus", "van")):
+        base += ", wheels visible, side angle, clean body"
+    return base
 
 
 @app.post("/imagine/canonical")

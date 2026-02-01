@@ -13,6 +13,13 @@ export function ModelViewer({ src }) {
     el.setAttribute('auto-rotate', '')
     el.setAttribute('camera-controls', '')
     el.setAttribute('shadow-intensity', '1')
+    el.setAttribute('shadow-softness', '0.8')
+    el.setAttribute('exposure', '1.15')
+    el.setAttribute('tone-mapping', 'commerce')
+    el.setAttribute('camera-orbit', '45deg 75deg 2.2m')
+    el.setAttribute('min-camera-orbit', 'auto auto 1.2m')
+    el.setAttribute('max-camera-orbit', 'auto auto 6m')
+    // Use default lighting (external HDR URLs like modelviewer.dev can 404)
     el.setAttribute('style', 'width:100%;height:100%;min-height:320px;background:#0f172a')
     el.addEventListener('error', () => setLoadError(true))
     containerRef.current.innerHTML = ''
@@ -25,8 +32,17 @@ export function ModelViewer({ src }) {
 
   if (loadError) {
     return (
-      <div className="w-full h-full min-h-[320px] flex items-center justify-center text-slate-500 bg-slate-900/80">
-        Could not load 3D model. Try downloading the GLB.
+      <div className="w-full h-full min-h-[320px] flex flex-col items-center justify-center gap-3 text-slate-400 bg-slate-900/80 p-4">
+        <p>Could not load 3D model in viewer.</p>
+        {src && (
+          <a
+            href={src}
+            download
+            className="text-cyan-400 hover:underline font-medium"
+          >
+            Download GLB
+          </a>
+        )}
       </div>
     )
   }

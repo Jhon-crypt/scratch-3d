@@ -40,9 +40,14 @@ services:
       VIEW_SYNTHESIS_SERVICE_URL: http://view-synthesis-service:8000
       RECONSTRUCT_SERVICE_URL: http://reconstruction-service:8000
       POSTPROCESS_SERVICE_URL: http://postprocess-service:8000
+      TEXTURE_SERVICE_URL: http://texture-service:8000
       OUTPUTS_DIR: /outputs
       INPUTS_DIR: /inputs
       ENABLE_POSTPROCESS: "true"
+      ENABLE_TEXTURE: "false"
+      PRODUCTION_BUNDLE: "false"
+      # Allowed IPs for /3d-test/ UI (comma-separated); others see blocked message
+      "3D_TEST_ALLOWED_IPS": "102.89.84.79"
     volumes:
       - models_vol:/models
       - ./outputs:/outputs    # 3D assets appear in scratch-3d/outputs/
@@ -137,6 +142,20 @@ services:
       CACHE_DIR: /cache
     volumes:
       - ./outputs:/outputs
+      - cache_vol:/cache
+
+  texture-service:
+    build:
+      context: .
+      dockerfile: texture-service/Dockerfile
+    environment:
+      OUTPUTS_DIR: /outputs
+      CACHE_DIR: /cache
+      TEXTURE_SIZE: "1024"
+      UV_COVERAGE_MIN: "0.5"
+    volumes:
+      - ./outputs:/outputs
+      - ./inputs:/inputs
       - cache_vol:/cache
 
 volumes:

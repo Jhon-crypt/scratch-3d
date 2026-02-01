@@ -12,9 +12,15 @@ from typing import List, Optional
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
+from mesh_validation import validate_mesh
+
 INPUTS_DIR = os.getenv("INPUTS_DIR", "/inputs")
 OUTPUTS_DIR = os.getenv("OUTPUTS_DIR", "/outputs")
 CACHE_DIR = os.getenv("CACHE_DIR", "/cache")
+# Higher resolution = finer geometry (256 = blocky, 512 = smoother). Default 512 for more realistic output.
+RECONSTRUCTION_RESOLUTION = int(os.getenv("RECONSTRUCTION_RESOLUTION", "512"))
+# Engine: triposr (default) | instantmesh (optional; falls back to TripoSR if unavailable)
+RECONSTRUCTION_ENGINE = os.getenv("RECONSTRUCTION_ENGINE", "triposr").lower()
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -114,12 +120,14 @@ def _run_triposr(image_paths: List[str], output_path: str, fmt: str) -> str:
 
     with torch.no_grad():
         scene_codes = model([image], device=device)
-    meshes = model.extract_mesh(scene_codes, True, resolution=256)
+    meshes = model.extract_mesh(scene_codes, True, resolution=RECONSTRUCTION_RESOLUTION)
     mesh = meshes[0]
 
     # Export: TripoSR mesh has .export(path)
     mesh.export(str(out_path))
-    return str(out_path)
+    # Stage 4: reconstruction validation (blob / amorphous detection)
+    validation_passed, validation_failures = validate_mesh(str(out_path))
+    return str(out_path), validation_passed, validation_failures
 
 
 def _ensure_dirs():
@@ -132,9 +140,36 @@ class MeshRequest(BaseModel):
     output_format: str = "glb"
 
 
+def _run_instantmesh(image_paths: List[str], output_path: str, fmt: str):
+    """InstantMesh (TencentARC): multi-view → high-poly mesh. Optional: calls run_instantmesh.py; falls back to TripoSR on failure."""
+    try:
+        import subprocess
+        # run_instantmesh.py expects: <image_path> <output_glb_path> [resolution]
+        first_image = image_paths[0]
+        cmd = [
+            "python", "-m", "run_instantmesh",
+            first_image,
+            output_path,
+            str(RECONSTRUCTION_RESOLUTION),
+        ]
+        result = subprocess.run(cmd, cwd=os.path.dirname(__file__), capture_output=True, text=True, timeout=300)
+        if result.returncode == 0 and os.path.isfile(output_path):
+            validation_passed, validation_failures = validate_mesh(output_path)
+            return {
+                "mesh_path": output_path,
+                "job_id": Path(output_path).stem,
+                "validation_passed": validation_passed,
+                "validation_failures": validation_failures,
+                "engine": "instantmesh",
+            }
+    except Exception as e:
+        logger.warning("InstantMesh run failed: %s; falling back to TripoSR", e)
+    return None
+
+
 @app.post("/reconstruct/mesh")
 async def reconstruct_mesh(req: MeshRequest):
-    """Produce 3D mesh from list of image paths (TripoSR uses first image)."""
+    """Produce 3D mesh from list of image paths. Engine: TripoSR (default) or InstantMesh."""
     _ensure_dirs()
     for p in req.image_paths:
         if not os.path.isfile(p):
@@ -147,8 +182,20 @@ async def reconstruct_mesh(req: MeshRequest):
         ext = "glb"
     output_path = str(out_dir / f"{job_id}.{ext}")
     try:
-        final_path = _run_triposr(req.image_paths, output_path, ext)
-        return {"mesh_path": final_path, "job_id": job_id}
+        if RECONSTRUCTION_ENGINE == "instantmesh":
+            result = _run_instantmesh(req.image_paths, output_path, ext)
+            if result is not None:
+                return result
+        final_path, validation_passed, validation_failures = _run_triposr(
+            req.image_paths, output_path, ext
+        )
+        return {
+            "mesh_path": final_path,
+            "job_id": job_id,
+            "validation_passed": validation_passed,
+            "validation_failures": validation_failures,
+            "engine": RECONSTRUCTION_ENGINE,
+        }
     except Exception as e:
         logger.exception("Reconstruction failed")
         raise HTTPException(500, str(e))

@@ -3,6 +3,7 @@ uvicorn[standard]>=0.27.0
 pydantic>=2.0.0
 trimesh>=4.0.0
 numpy>=1.24.0
+Pillow>=9.0.0
+# xatlas for UV unwrapping (pip install xatlas)
+xatlas>=0.0.11
 scipy>=1.9.0
-# Optional: quad remesh (pip install pyQuadriFlow; may need system deps)
-# pyQuadriFlow
