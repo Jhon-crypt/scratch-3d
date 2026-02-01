@@ -17,9 +17,9 @@ from mesh_validation import validate_mesh
 INPUTS_DIR = os.getenv("INPUTS_DIR", "/inputs")
 OUTPUTS_DIR = os.getenv("OUTPUTS_DIR", "/outputs")
 CACHE_DIR = os.getenv("CACHE_DIR", "/cache")
-# Higher resolution = finer geometry (256 = blocky, 512 = smoother). Default 512 for more realistic output.
+# Higher resolution = finer geometry. Production spec: 1024 or higher (512 = current default).
 RECONSTRUCTION_RESOLUTION = int(os.getenv("RECONSTRUCTION_RESOLUTION", "512"))
-# Engine: triposr (default) | instantmesh (optional; falls back to TripoSR if unavailable)
+# Engine: triposr (default) | instantmesh (LGM-style; falls back to TripoSR if unavailable)
 RECONSTRUCTION_ENGINE = os.getenv("RECONSTRUCTION_ENGINE", "triposr").lower()
 
 logging.basicConfig(level=logging.INFO)
@@ -97,13 +97,14 @@ def _preprocess_image(image_path: str, foreground_ratio: float = 0.85):
     return Image.fromarray((arr * 255.0).astype(np.uint8))
 
 
-def _run_triposr(image_paths: List[str], output_path: str, fmt: str) -> str:
+def _run_triposr(image_paths: List[str], output_path: str, fmt: str, resolution: int = None) -> str:
     """
     Run TripoSR on the first image. Write mesh to output_path.
-    Requires TripoSR to be loaded; no silent cube fallback.
+    resolution: mesh resolution (default RECONSTRUCTION_RESOLUTION); production spec 1024.
     """
     out_path = Path(output_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    res = resolution if resolution is not None else RECONSTRUCTION_RESOLUTION
 
     model = _get_model()
     if model is None:
@@ -114,13 +115,12 @@ def _run_triposr(image_paths: List[str], output_path: str, fmt: str) -> str:
 
     import torch
     device = _device()
-    # TripoSR is single-image; use first view
     image_path = image_paths[0]
     image = _preprocess_image(image_path)
 
     with torch.no_grad():
         scene_codes = model([image], device=device)
-    meshes = model.extract_mesh(scene_codes, True, resolution=RECONSTRUCTION_RESOLUTION)
+    meshes = model.extract_mesh(scene_codes, True, resolution=res)
     mesh = meshes[0]
 
     # Export: TripoSR mesh has .export(path)
@@ -138,19 +138,20 @@ def _ensure_dirs():
 class MeshRequest(BaseModel):
     image_paths: List[str] = Field(..., min_length=1, max_length=16)
     output_format: str = "glb"
+    resolution: Optional[int] = None  # mesh resolution; production spec 1024 (default from env)
 
 
-def _run_instantmesh(image_paths: List[str], output_path: str, fmt: str):
+def _run_instantmesh(image_paths: List[str], output_path: str, fmt: str, resolution: int = None):
     """InstantMesh (TencentARC): multi-view → high-poly mesh. Optional: calls run_instantmesh.py; falls back to TripoSR on failure."""
+    res = resolution if resolution is not None else RECONSTRUCTION_RESOLUTION
     try:
         import subprocess
-        # run_instantmesh.py expects: <image_path> <output_glb_path> [resolution]
         first_image = image_paths[0]
         cmd = [
             "python", "-m", "run_instantmesh",
             first_image,
             output_path,
-            str(RECONSTRUCTION_RESOLUTION),
+            str(res),
         ]
         result = subprocess.run(cmd, cwd=os.path.dirname(__file__), capture_output=True, text=True, timeout=300)
         if result.returncode == 0 and os.path.isfile(output_path):
@@ -181,13 +182,14 @@ async def reconstruct_mesh(req: MeshRequest):
     if ext not in ("glb", "obj", "fbx"):
         ext = "glb"
     output_path = str(out_dir / f"{job_id}.{ext}")
+    resolution = req.resolution if req.resolution is not None else RECONSTRUCTION_RESOLUTION
     try:
         if RECONSTRUCTION_ENGINE == "instantmesh":
-            result = _run_instantmesh(req.image_paths, output_path, ext)
+            result = _run_instantmesh(req.image_paths, output_path, ext, resolution=resolution)
             if result is not None:
                 return result
         final_path, validation_passed, validation_failures = _run_triposr(
-            req.image_paths, output_path, ext
+            req.image_paths, output_path, ext, resolution=resolution
         )
         return {
             "mesh_path": final_path,
@@ -199,6 +201,23 @@ async def reconstruct_mesh(req: MeshRequest):
     except Exception as e:
         logger.exception("Reconstruction failed")
         raise HTTPException(500, str(e))
+
+
+class ValidateRequest(BaseModel):
+    mesh_path: str = Field(..., min_length=1)
+    manifold_required: bool = False  # production spec: ensure manifold and watertight before job complete
+
+
+@app.post("/reconstruct/validate")
+async def validate_mesh_endpoint(req: ValidateRequest):
+    """Final validation: manifold/watertight. Called by orchestrator before marking job complete (production)."""
+    if not os.path.isfile(req.mesh_path):
+        raise HTTPException(400, "Mesh file not found")
+    passed, failures = validate_mesh(
+        req.mesh_path,
+        manifold_required=req.manifold_required,
+    )
+    return {"passed": passed, "failures": failures}
 
 
 @app.get("/health")

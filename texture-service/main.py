@@ -28,6 +28,7 @@ class TextureRequest(BaseModel):
     output_format: str = "glb"
     texture_size: int = Field(default=1024, ge=256, le=4096)
     inpaint_hidden: bool = False  # fill occluded UV texels via neighbor diffusion
+    generate_pbr_maps: bool = True  # also write Normal and MetallicRoughness maps (4K PBR spec)
 
 
 def _inpaint_texture_holes(tex: "np.ndarray", default_color=(128, 128, 128), iterations: int = 4) -> "np.ndarray":
@@ -156,6 +157,81 @@ def _project_canonical_to_texture(vertices_3d, faces_3d, uvs, canonical_path: st
     return tex
 
 
+def _rasterize_normal_map(vertices_3d, faces_3d, uvs, texture_size: int):
+    """
+    Rasterize face normals into UV space. PBR normal map (object-space encoded as RGB).
+    Default (unpainted) = (128, 128, 255) = flat tangent-space; we use object-space for simplicity.
+    """
+    import numpy as np
+    verts = np.asarray(vertices_3d, dtype=np.float64)
+    faces = np.asarray(faces_3d)
+    uv_flat = np.asarray(uvs).reshape(-1, 2)
+    n_verts = len(verts)
+    if n_verts == 0 or len(faces) == 0:
+        out = np.zeros((texture_size, texture_size, 3), dtype=np.uint8)
+        out[:, :, 2] = 255  # flat = (0,0,1) -> (128,128,255)
+        out[:, :, :2] = 128
+        return out
+    if len(uv_flat) >= n_verts:
+        uv_per_vertex = uv_flat[:n_verts]
+    else:
+        uv_per_vertex = np.zeros((n_verts, 2))
+    # Default: flat normal (0,0,1) -> RGB (128,128,255)
+    out = np.zeros((texture_size, texture_size, 3), dtype=np.uint8)
+    out[:, :, 0] = 128
+    out[:, :, 1] = 128
+    out[:, :, 2] = 255
+    for tri in faces:
+        i, j, k = int(tri[0]), int(tri[1]), int(tri[2])
+        if i >= n_verts or j >= n_verts or k >= n_verts:
+            continue
+        va, vb, vc = verts[i], verts[j], verts[k]
+        edge_ab = vb - va
+        edge_ac = vc - va
+        n = np.cross(edge_ab, edge_ac)
+        norm = np.linalg.norm(n)
+        if norm > 1e-10:
+            n = n / norm
+        else:
+            n = np.array([0.0, 0.0, 1.0])
+        # Encode object-space normal to RGB: (n*0.5+0.5)*255
+        r, g, b = (np.clip(n * 0.5 + 0.5, 0, 1) * 255).astype(np.uint8)
+        ua, va_u = uv_per_vertex[i]
+        ub, vb_u = uv_per_vertex[j]
+        uc, vc_u = uv_per_vertex[k]
+        tx_a = int(ua * (texture_size - 1)) % texture_size
+        ty_a = int((1 - va_u) * (texture_size - 1)) % texture_size
+        tx_b = int(ub * (texture_size - 1)) % texture_size
+        ty_b = int((1 - vb_u) * (texture_size - 1)) % texture_size
+        tx_c = int(uc * (texture_size - 1)) % texture_size
+        ty_c = int((1 - vc_u) * (texture_size - 1)) % texture_size
+        tmin_x = max(0, min(tx_a, tx_b, tx_c))
+        tmax_x = min(texture_size - 1, max(tx_a, tx_b, tx_c) + 1)
+        tmin_y = max(0, min(ty_a, ty_b, ty_c))
+        tmax_y = min(texture_size - 1, max(ty_a, ty_b, ty_c) + 1)
+        if tmax_x <= tmin_x or tmax_y <= tmin_y:
+            continue
+        out[tmin_y:tmax_y, tmin_x:tmax_x, 0] = r
+        out[tmin_y:tmax_y, tmin_x:tmax_x, 1] = g
+        out[tmin_y:tmax_y, tmin_x:tmax_x, 2] = b
+    return out
+
+
+def _rasterize_metallic_roughness(texture_size: int, roughness: float = 0.5, metallic: float = 0.0):
+    """
+    glTF metallicRoughness texture: R=unused, G=roughness, B=metallic (0-1 -> 0-255).
+    Single constant value for the whole map; can be extended to per-texel later.
+    """
+    import numpy as np
+    g = int(np.clip(roughness, 0, 1) * 255)
+    b = int(np.clip(metallic, 0, 1) * 255)
+    out = np.zeros((texture_size, texture_size, 3), dtype=np.uint8)
+    out[:, :, 0] = 255  # R unused
+    out[:, :, 1] = g
+    out[:, :, 2] = b
+    return out
+
+
 def _apply_texture_to_mesh(mesh, texture_array, uvs, texture_size: int):
     """Attach texture to mesh and return mesh with TextureVisuals."""
     import trimesh
@@ -181,13 +257,16 @@ def run_texture_pipeline(
     output_path: str,
     texture_size: int = 1024,
     inpaint: bool = False,
-) -> Tuple[str, float]:
+    generate_pbr_maps: bool = True,
+) -> Tuple[str, float, Optional[str], Optional[str]]:
     """
-    UV unwrap, project canonical to texture, optional inpainting, export GLB.
-    Returns (output_path, uv_coverage).
+    UV unwrap, project canonical to albedo, optional inpainting, export GLB.
+    Optionally generate Normal and MetallicRoughness maps (4K PBR spec).
+    Returns (output_path, uv_coverage, normal_map_path, metallic_roughness_path).
     """
     import trimesh
     import numpy as np
+    from PIL import Image
 
     mesh = trimesh.load(mesh_path, force="mesh", process=False)
     if isinstance(mesh, trimesh.Scene):
@@ -201,37 +280,45 @@ def run_texture_pipeline(
     # UV unwrap with xatlas
     result = _unwrap_xatlas(verts, faces)
     if result is None:
-        # Fallback: no UV, export mesh as-is (vertex color preserved)
         mesh.export(output_path, file_type="glb")
-        return output_path, 0.0
+        return output_path, 0.0, None, None
 
     new_verts, new_faces, uvs = result
     uvs = np.asarray(uvs, dtype=np.float64)
 
-    # UV coverage
     coverage = _uv_coverage(new_faces, uvs)
     if coverage < UV_COVERAGE_MIN:
         logger.warning("UV coverage %.2f < min %.2f", coverage, UV_COVERAGE_MIN)
 
-    # Rebuild mesh with new verts/faces (xatlas may have duplicated vertices)
     mesh_uv = trimesh.Trimesh(vertices=new_verts, faces=new_faces, process=False)
-    # Assign UVs: xatlas returns uvs per vertex in new order
     mesh_uv.visual = trimesh.visual.TextureVisuals(uv=uvs)
 
-    # Project canonical image to texture
+    # Albedo: project canonical image onto UV
     texture_array = _project_canonical_to_texture(
         mesh_uv.vertices, mesh_uv.faces, uvs, canonical_path, texture_size
     )
-
-    # Inpaint occluded UV: fill default-color texels with neighbor diffusion (no external API)
     if inpaint:
         texture_array = _inpaint_texture_holes(texture_array, default_color=(128, 128, 128))
 
-    # Attach texture and export
+    out_dir = Path(output_path).parent
+    out_dir.mkdir(parents=True, exist_ok=True)
+    base = Path(output_path).stem
+
+    normal_path = None
+    metallic_roughness_path = None
+    if generate_pbr_maps:
+        # Normal map: geometry normals rasterized in UV space (object-space encoding)
+        normal_array = _rasterize_normal_map(mesh_uv.vertices, mesh_uv.faces, uvs, texture_size)
+        normal_path = str(out_dir / f"{base}_normal.png")
+        Image.fromarray(normal_array).save(normal_path)
+        # MetallicRoughness: constant roughness/metallic (glTF: G=roughness, B=metallic)
+        mr_array = _rasterize_metallic_roughness(texture_size, roughness=0.5, metallic=0.0)
+        metallic_roughness_path = str(out_dir / f"{base}_metallicRoughness.png")
+        Image.fromarray(mr_array).save(metallic_roughness_path)
+
     mesh_final = _apply_texture_to_mesh(mesh_uv, texture_array, uvs, texture_size)
-    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     mesh_final.export(output_path, file_type="glb")
-    return output_path, coverage
+    return output_path, coverage, normal_path, metallic_roughness_path
 
 
 @app.post("/texture/bake")
@@ -251,18 +338,24 @@ async def bake_texture(req: TextureRequest):
     out_path = str(Path(OUTPUTS_DIR) / "textured" / f"{job_id}.{ext}")
 
     try:
-        final_path, uv_coverage = run_texture_pipeline(
+        final_path, uv_coverage, normal_path, metallic_roughness_path = run_texture_pipeline(
             req.mesh_path,
             req.canonical_image_path,
             out_path,
             texture_size=req.texture_size,
             inpaint=req.inpaint_hidden,
+            generate_pbr_maps=req.generate_pbr_maps,
         )
-        return {
+        out = {
             "output_path": final_path,
             "uv_coverage": round(uv_coverage, 4),
             "validation_passed": uv_coverage >= UV_COVERAGE_MIN,
         }
+        if normal_path:
+            out["normal_map_path"] = normal_path
+        if metallic_roughness_path:
+            out["metallic_roughness_path"] = metallic_roughness_path
+        return out
     except Exception as e:
         logger.exception("Texture bake failed: %s", e)
         raise HTTPException(500, str(e))

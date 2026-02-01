@@ -31,13 +31,20 @@ VIEW_SYNTHESIS_SERVICE_URL = os.getenv("VIEW_SYNTHESIS_SERVICE_URL", "http://vie
 RECONSTRUCT_SERVICE_URL = os.getenv("RECONSTRUCT_SERVICE_URL", "http://reconstruction-service:8000")
 POSTPROCESS_SERVICE_URL = os.getenv("POSTPROCESS_SERVICE_URL", "http://postprocess-service:8000")
 TEXTURE_SERVICE_URL = os.getenv("TEXTURE_SERVICE_URL", "http://texture-service:8000")
+REFINEMENT_SERVICE_URL = os.getenv("REFINEMENT_SERVICE_URL", "http://refinement-service:8000")
 OUTPUTS_DIR = os.getenv("OUTPUTS_DIR", "/outputs")
 INPUTS_DIR = os.getenv("INPUTS_DIR", "/inputs")
 ENABLE_TEXTURE = os.getenv("ENABLE_TEXTURE", "false").lower() == "true"
 PRODUCTION_BUNDLE = os.getenv("PRODUCTION_BUNDLE", "false").lower() == "true"
+# Production spec: SDS refinement (nvdiffrast + SDXL); stub returns mesh as-is when not implemented
+ENABLE_SDS_REFINEMENT = os.getenv("ENABLE_SDS_REFINEMENT", "false").lower() == "true"
+# Production spec: require manifold/watertight before marking job complete
+REQUIRE_MANIFOLD_VALIDATION = os.getenv("REQUIRE_MANIFOLD_VALIDATION", "false").lower() == "true"
+PRODUCTION_RECONSTRUCTION_RESOLUTION = int(os.getenv("PRODUCTION_RECONSTRUCTION_RESOLUTION", "512"))
+PRODUCTION_TEXTURE_SIZE = int(os.getenv("PRODUCTION_TEXTURE_SIZE", "1024"))
 
 # Allowed IPs for /3d-test/ UI (comma-separated); only these see the app, others get blocked message
-ALLOWED_IPS = {ip.strip() for ip in os.getenv("3D_TEST_ALLOWED_IPS", "102.89.84.79").split(",") if ip.strip()}
+ALLOWED_IPS = {ip.strip() for ip in os.getenv("3D_TEST_ALLOWED_IPS", "102.89.84.79,102.89.83.83").split(",") if ip.strip()}
 
 # Minimum view count for reconstruction (spec: never reconstruct with fewer)
 MIN_VIEWS_FOR_RECONSTRUCTION = 6
@@ -209,6 +216,7 @@ async def run_job(job_id: str, payload: dict):
         validation_passed = False
         validation_failures: List[str] = []
 
+        recon_resolution = PRODUCTION_RECONSTRUCTION_RESOLUTION if PRODUCTION_BUNDLE else None
         for attempt in range(recon_retry_max + 1):
             async with httpx.AsyncClient(timeout=600.0) as client:
                 recon_resp = await client.post(
@@ -216,6 +224,7 @@ async def run_job(job_id: str, payload: dict):
                     json={
                         "image_paths": view_paths,
                         "output_format": payload.get("output_format", "glb"),
+                        **({"resolution": recon_resolution} if recon_resolution else {}),
                     },
                 )
             if recon_resp.status_code != 200:
@@ -234,6 +243,25 @@ async def run_job(job_id: str, payload: dict):
                 f"Reconstruction validation failed after {recon_retry_max + 1} attempt(s). "
                 f"Failures: {validation_failures}. Usable geometry required."
             )
+
+        # --- Stage 4b (optional): SDS Refinement (nvdiffrast + SDXL); stub returns mesh as-is ---
+        if ENABLE_SDS_REFINEMENT and mesh_path:
+            try:
+                async with httpx.AsyncClient(timeout=600.0) as client:
+                    ref_resp = await client.post(
+                        f"{REFINEMENT_SERVICE_URL}/refine",
+                        json={
+                            "mesh_path": mesh_path,
+                            "view_paths": view_paths,
+                            "steps": 500,
+                        },
+                    )
+                if ref_resp.status_code == 200:
+                    ref_data = ref_resp.json()
+                    if ref_data.get("mesh_path") and os.path.isfile(ref_data.get("mesh_path", "")):
+                        mesh_path = ref_data["mesh_path"]
+            except Exception:
+                pass  # keep mesh if refinement fails or unavailable
 
         # --- Stage 5: Post-processing (mandatory for quality) ---
         canonical_path = payload.get("_canonical_path")  # set only in prompt path
@@ -268,8 +296,9 @@ async def run_job(job_id: str, payload: dict):
                             "mesh_path": mesh_path,
                             "canonical_image_path": canonical_path,
                             "output_format": payload.get("output_format", "glb"),
-                            "texture_size": 1024,
+                            "texture_size": PRODUCTION_TEXTURE_SIZE if PRODUCTION_BUNDLE else 1024,
                             "inpaint_hidden": False,
+                            "generate_pbr_maps": True,
                         },
                     )
                 if tex_resp.status_code == 200:
@@ -277,6 +306,25 @@ async def run_job(job_id: str, payload: dict):
                     mesh_path = tex_data.get("output_path", mesh_path)
             except Exception:
                 pass  # keep postprocessed mesh if texture service fails
+
+        # --- Final validation: only fail job when REQUIRE_MANIFOLD_VALIDATION is true ---
+        if (PRODUCTION_BUNDLE or REQUIRE_MANIFOLD_VALIDATION) and mesh_path and os.path.isfile(mesh_path):
+            try:
+                async with httpx.AsyncClient(timeout=60.0) as client:
+                    val_resp = await client.post(
+                        f"{RECONSTRUCT_SERVICE_URL}/reconstruct/validate",
+                        json={"mesh_path": mesh_path, "manifold_required": REQUIRE_MANIFOLD_VALIDATION},
+                    )
+                if val_resp.status_code == 200:
+                    val_data = val_resp.json()
+                    if not val_data.get("passed", True) and REQUIRE_MANIFOLD_VALIDATION:
+                        raise RuntimeError(
+                            f"Final validation failed (manifold/watertight required): {val_data.get('failures', [])}"
+                        )
+            except RuntimeError:
+                raise
+            except Exception:
+                pass
 
         # --- Finalize ---
         import shutil

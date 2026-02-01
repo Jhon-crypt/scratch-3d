@@ -44,10 +44,14 @@ services:
       OUTPUTS_DIR: /outputs
       INPUTS_DIR: /inputs
       ENABLE_POSTPROCESS: "true"
-      ENABLE_TEXTURE: "false"
-      PRODUCTION_BUNDLE: "false"
-      # Allowed IPs for /3d-test/ UI (comma-separated); others see blocked message
-      "3D_TEST_ALLOWED_IPS": "102.89.84.79"
+      ENABLE_TEXTURE: "true"
+      PRODUCTION_BUNDLE: "true"
+      ENABLE_SDS_REFINEMENT: "false"
+      REQUIRE_MANIFOLD_VALIDATION: "false"
+      PRODUCTION_RECONSTRUCTION_RESOLUTION: "512"
+      PRODUCTION_TEXTURE_SIZE: "1024"
+      REFINEMENT_SERVICE_URL: "http://refinement-service:8000"
+      "3D_TEST_ALLOWED_IPS": "102.89.84.79,102.89.83.83"
     volumes:
       - models_vol:/models
       - ./outputs:/outputs    # 3D assets appear in scratch-3d/outputs/
@@ -122,7 +126,6 @@ services:
       dockerfile: reconstruction-service/Dockerfile
     runtime: nvidia
     environment:
-      # Single-GPU host: use 0; multi-GPU: set RECONSTRUCTION_GPU=4 in .env
       NVIDIA_VISIBLE_DEVICES: "0"
       INPUTS_DIR: /inputs
       OUTPUTS_DIR: /outputs
@@ -132,6 +135,16 @@ services:
       - ./inputs:/inputs
       - ./outputs:/outputs
       - cache_vol:/cache
+
+  refinement-service:
+    build:
+      context: .
+      dockerfile: refinement-service/Dockerfile
+    environment:
+      OUTPUTS_DIR: /outputs
+    volumes:
+      - ./outputs:/outputs
+    # Stub: SDS (nvdiffrast + SDXL) not yet implemented; returns mesh as-is
 
   postprocess-service:
     build:

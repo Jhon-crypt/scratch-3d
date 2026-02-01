@@ -4,6 +4,19 @@ This document maps the upgrade from **experimental/low-fidelity** (TripoSR, vert
 
 ---
 
+## Orchestration Plan (6 Steps) — Compliance
+
+| Step | Spec | Implementation |
+|------|------|----------------|
+| **1. View Synthesis** | Replace Zero123++ with **SV3D** for 360° consistency; **SAM** for masking | `VIEW_SYNTHESIS_ENGINE=sv3d` uses SV3D_u orbital; `USE_SAM_MASKING=true` reserved for SAM (rembg until SAM integrated). |
+| **2. Reconstruction** | Swap TripoSR for **InstantMesh** at **1024** resolution | `RECONSTRUCTION_ENGINE=instantmesh`; orchestrator sends `resolution=1024` when `PRODUCTION_BUNDLE`; `MeshRequest.resolution` supported. |
+| **3. Refinement** | **SDS** loop (nvdiffrast + SDXL), 500–1000 steps | `ENABLE_SDS_REFINEMENT=true` + `refinement-service`: stub returns mesh as-is; nvdiffrast/SDXL to be implemented. |
+| **4. Texturing** | xatlas UV, **4K PBR** (Albedo, Normal, Roughness) | texture-service: xatlas, albedo in GLB, Normal + MetallicRoughness PNGs; `texture_size=4096` when `PRODUCTION_BUNDLE`; `generate_pbr_maps=true`. |
+| **5. Post-Process** | **QuadriFlow** for quad topology; no Laplacian | Taubin smoothing; `quad_remesh=true` when `PRODUCTION_BUNDLE` (QuadriFlow). |
+| **6. Validation** | Final mesh **manifold and watertight** before complete | `POST /reconstruct/validate` with `manifold_required=true`; orchestrator calls when `PRODUCTION_BUNDLE` or `REQUIRE_MANIFOLD_VALIDATION`; job fails if validation fails. |
+
+---
+
 ## Stage Comparison
 
 | Stage | Current (Experimental) | Production Grade (Target) |
@@ -63,6 +76,7 @@ This document maps the upgrade from **experimental/low-fidelity** (TripoSR, vert
 - [x] New `texture-service`: UV unwrap (xatlas), texture projection from canonical image to UV, export GLB with 1024² texture.
 - [x] Validation: UV island coverage >50% (`UV_COVERAGE_MIN`); returns `validation_passed` and `uv_coverage`.
 - [x] Inpainting step for occluded UV regions (neighbor-diffusion in texture-service; optional SD/LC later).
+- [x] **4K PBR maps:** Normal map (geometry rasterized in UV) and MetallicRoughness map (glTF: G=roughness, B=metallic) written alongside albedo; `generate_pbr_maps=true` in texture-service; response includes `normal_map_path`, `metallic_roughness_path`.
 
 ---
 
@@ -122,4 +136,18 @@ Deliver a **zipped package** containing:
 5. **Reconstruction:** InstantMesh/SF3D evaluation and integration.  
 6. **Texture:** UV unwrap + projection + inpainting service.  
 7. **Bundle:** Zip output (high-poly + quad + 4K textures).
+
+---
+
+## Extended Plan (SV3D / SDS / 4K PBR)
+
+Alignment with the full production-grade spec:
+
+| Spec item | Status |
+|-----------|--------|
+| **View synthesis:** SV3D_u or MVDream (8–16 views), SAM for masking | Stub: SV3D option; Zero123++ and rembg in use. |
+| **Reconstruction:** InstantMesh/SF3D, LGM coarse shell, 1024 res | Stub: InstantMesh subprocess; TripoSR 512 default. |
+| **SDS refinement:** nvdiffrast + SDXL, 500–1000 steps | Not implemented; optional future stage. |
+| **Texturing:** xatlas UV, 4K PBR (Albedo, Normal, Roughness/Metallic) | Done: albedo in GLB; Normal and MetallicRoughness PNGs written. |
+| **Post-process:** QuadriFlow quad mesh, manifold/watertight validation | QuadriFlow optional; validation in mesh_validation. |
 

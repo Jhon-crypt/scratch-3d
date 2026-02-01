@@ -57,8 +57,10 @@ from pydantic import BaseModel, Field
 
 INPUTS_DIR = os.getenv("INPUTS_DIR", "/inputs")
 OUTPUTS_DIR = os.getenv("OUTPUTS_DIR", "/outputs")
-# Engine: zero123 (default) | sv3d (SV3D orbital; requires chenguolin/sv3d-diffusers)
+# Engine: zero123 (default) | sv3d (SV3D_u orbital; requires chenguolin/sv3d-diffusers)
 VIEW_SYNTHESIS_ENGINE = os.getenv("VIEW_SYNTHESIS_ENGINE", "zero123").lower()
+# Masking: rembg (default) | sam (Segment Anything for razor-sharp silhouettes; set USE_SAM_MASKING=true when SAM integrated)
+USE_SAM_MASKING = os.getenv("USE_SAM_MASKING", "false").lower() == "true"
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
